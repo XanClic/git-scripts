@@ -1,0 +1,90 @@
+#!/usr/bin/ruby
+
+require 'shellwords'
+
+def die(msg, hint=nil)
+    $stderr.puts("\033[31;1m#{msg}\033[0m")
+    if hint
+        $stderr.puts("\033[1mHint: #{hint}\033[0m")
+    end
+    exit 1
+end
+
+def run(cmd)
+    puts("\033[1m$ #{cmd}\033[0m")
+    $stdout.write("OK? [y/n] ")
+    $stdout.flush
+    if gets.strip.downcase != 'y'
+        puts('(Aborting)')
+        exit 0
+    end
+    system(cmd)
+end
+
+def branch_exists?(name)
+    !`git branch --list #{name.shellescape}`.strip.empty?
+end
+
+upstream_branch = 'main'
+if !branch_exists?(upstream_branch)
+    upstream_branch = 'master'
+end
+if !branch_exists?(upstream_branch)
+    die('Found neither “main” nor “master”')
+end
+
+next_branch = `git branch --show-current`.strip
+if next_branch.empty?
+    die('Not on any branch')
+end
+
+m = next_branch.match(/^(.*)-next$/)
+if !m
+    die("Current branch (#{next_branch}) does not match the pattern `${topic}-next`")
+end
+base_branch = m[1]
+
+if !system("git merge-base --is-ancestor #{upstream_branch} #{next_branch}")
+    die("Upstream base branch #{upstream_branch} is not an ancestor of #{next_branch}")
+end
+
+remote = `git config get branch.#{base_branch.shellescape}.remote`.strip
+if remote.empty?
+    die("Base topic branch #{base_branch} has no remote info set", "Use git branch --set-upstream-to=${remote}/#{base_branch}")
+end
+
+max_topic_ver = `git branch --color=never --list #{"#{base_branch}-v*".shellescape} | sort | tail -n 1`.strip.sub("#{base_branch}-v", '')
+if max_topic_ver.empty?
+    max_topic_ver = 0
+else
+    max_topic_ver = Integer(max_topic_ver)
+end
+new_topic_ver = max_topic_ver + 1
+
+puts <<EOF
+Here’s the plan (currently on branch \033[1m#{next_branch}\033[0m):
+ · Go to branch \033[1m#{base_branch}\033[0m
+ · Reset \033[1m#{base_branch}\033[0m to \033[1m#{next_branch}\033[0m
+ · Review backport-diff of \033[1m#{upstream_branch}..#{base_branch}\033[0m vs. \033[1m#{remote}/#{base_branch}\033[0m
+ · Force-push \033[1m#{base_branch}\033[0m to \033[1m#{remote}/#{base_branch}\033[0m
+ · Create \033[1m#{base_branch}-v#{new_topic_ver}\033[0m from \033[1m#{base_branch}\033[0m
+ · Return to \033[1m#{next_branch}\033[0m
+
+EOF
+
+run("git checkout #{base_branch.shellescape}")
+run("git reset --hard #{next_branch.shellescape}")
+run("git backport-diff -r #{upstream_branch.shellescape}..#{base_branch.shellescape} -u #{remote.shellescape}/#{base_branch.shellescape}")
+
+puts
+puts("\033[1mAre those changes OK?\033[0m")
+$stdout.write("[y/n] ")
+$stdout.flush
+if gets.strip.downcase != 'y'
+    puts('(Aborting)')
+    exit 0
+end
+
+run("git push -f #{remote.shellescape} #{base_branch.shellescape}")
+run("git branch #{"#{base_branch}-v#{new_topic_ver}".shellescape}")
+run("git checkout #{next_branch}")
